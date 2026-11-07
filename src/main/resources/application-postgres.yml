@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/payments
+    username: payments
+    password: payments
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: payments-hikari
+      maximum-pool-size: 20
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect

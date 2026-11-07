@@ -1,0 +1,5 @@
+spring:
+  threads:
+    virtual:
+      # Aktifkan virtual threads (Tomcat request handling)
+      enabled: true

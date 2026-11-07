@@ -1,0 +1,302 @@
+openapi: 3.0.3
+info:
+  title: Payment Service Project (Demo)
+  version: 0.0.1
+  description: |
+    Kontrak API demo untuk interview Back-end Developer (Java).
+
+    Semua endpoint `/api/v1/payments/**` membutuhkan header `X-Api-Key`.
+    Endpoint webhook memakai HMAC-SHA256, bukan API key:
+    canonical string = `POST \n /api/v1/webhooks/partner \n <timestamp> \n sha256Hex(body)`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local
+
+tags:
+  - name: Payments
+  - name: Webhooks
+
+paths:
+  /api/v1/payments:
+    post:
+      tags: [Payments]
+      summary: Membuat payment
+      description: |
+        Wajib mengirim `Idempotency-Key`. Request kedua dengan key yang sama dan body
+        yang sama akan mengembalikan response pertama (HTTP 200, `replayed=true`).
+        Body berbeda dengan key yang sama menghasilkan HTTP 409.
+      operationId: createPayment
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Kunci unik per operasi create. Maksimal 128 karakter.
+          schema:
+            type: string
+            maxLength: 128
+            example: demo-001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+            example:
+              customerId: CUST-1
+              amount: 100000.00
+              currency: IDR
+              description: Invoice #1
+      responses:
+        '201':
+          description: Payment berhasil dibuat (status bisa SUCCEEDED, FAILED, atau IN_DOUBT)
+          headers:
+            Idempotent-Replayed:
+              schema:
+                type: string
+                enum: ['false']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResult'
+        '200':
+          description: Replay dari request sebelumnya dengan Idempotency-Key yang sama
+          headers:
+            Idempotent-Replayed:
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResult'
+        '400':
+          description: Validasi gagal / header wajib tidak ada
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Validasi gagal
+                status: 400
+                detail: Ada field request yang tidak valid
+                code: VALIDATION_ERROR
+                errors:
+                  amount: amount minimal 0.01
+        '401':
+          description: API key tidak ada/tidak valid
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Idempotency-Key dipakai body berbeda, atau request masih diproses
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                reused:
+                  value:
+                    type: about:blank
+                    title: Idempotency-Key conflict
+                    status: 409
+                    detail: Idempotency-Key sudah dipakai untuk request body yang berbeda
+                    code: IDEMPOTENCY_KEY_REUSED
+                inProgress:
+                  value:
+                    type: about:blank
+                    title: Request masih diproses
+                    status: 409
+                    detail: Request dengan Idempotency-Key demo-001 masih diproses. Coba lagi setelah selesai.
+                    code: REQUEST_IN_PROGRESS
+
+  /api/v1/payments/{id}:
+    get:
+      tags: [Payments]
+      summary: Mengambil payment berdasarkan id
+      operationId: getPayment
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Detail payment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResult'
+        '401':
+          description: API key tidak ada/tidak valid
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Payment tidak ditemukan
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Payment tidak ditemukan
+                status: 404
+                detail: Payment tidak ditemukan: 00000000-0000-0000-0000-000000000000
+                code: PAYMENT_NOT_FOUND
+
+  /api/v1/webhooks/partner:
+    post:
+      tags: [Webhooks]
+      summary: Callback dari partner (HMAC)
+      description: |
+        Signature dihitung dari raw body. Toleransi timestamp 5 menit.
+        Event dengan `eventId` yang sama hanya diproses sekali.
+      operationId: partnerWebhook
+      security: []
+      parameters:
+        - name: X-Timestamp
+          in: header
+          required: true
+          description: Unix epoch seconds
+          schema:
+            type: string
+            example: '1768378500'
+        - name: X-Signature
+          in: header
+          required: true
+          description: '`v1=<hex HMAC-SHA256>`'
+          schema:
+            type: string
+            example: v1=8f14e45fceea167a5a36dedd4bea2543...
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+      responses:
+        '200':
+          description: Webhook diterima (termasuk duplikat)
+        '400':
+          description: Body/timestamp tidak valid
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Signature salah atau timestamp kedaluwarsa
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      required: [customerId, amount, currency]
+      properties:
+        customerId:
+          type: string
+          maxLength: 64
+          example: CUST-1
+        amount:
+          type: number
+          format: bigdecimal
+          minimum: 0.01
+          example: 100000.00
+        currency:
+          type: string
+          pattern: '^[A-Za-z]{3}$'
+          example: IDR
+        description:
+          type: string
+          maxLength: 255
+          example: Invoice #1
+
+    PaymentResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+          example: PAY-20260114150000-A1B2C3
+        customerId:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+          example: IDR
+        status:
+          type: string
+          enum: [PENDING, IN_DOUBT, SUCCEEDED, FAILED]
+        partnerReference:
+          type: string
+          nullable: true
+        failureReason:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        replayed:
+          type: boolean
+
+    WebhookPayload:
+      type: object
+      required: [eventId, reference, status]
+      properties:
+        eventId:
+          type: string
+          example: evt-001
+        reference:
+          type: string
+          example: PAY-20260114150000-A1B2C3
+        status:
+          type: string
+          enum: [SUCCEEDED, FAILED]
+        partnerReference:
+          type: string
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+
+    Problem:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: string

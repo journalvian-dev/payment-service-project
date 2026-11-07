@@ -1,0 +1,340 @@
+{
+  "info": {
+    "name": "Payment Service Project",
+    "description": "Collection demo untuk payment service (REST + idempotency + HMAC webhook + in-doubt reconciliation). Jalankan lewat Collection Runner supaya urutan dan variable antar-request bekerja.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-Api-Key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "apiKey", "value": "local-dev-key" },
+    { "key": "hmacSecret", "value": "super-secret-hmac-key-change-me" },
+    { "key": "idempotencyKey", "value": "" },
+    { "key": "paymentId", "value": "" },
+    { "key": "paymentReference", "value": "" },
+    { "key": "inDoubtId", "value": "" },
+    { "key": "inDoubtReference", "value": "" },
+    { "key": "webhookBody", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "01 - Payments",
+      "item": [
+        {
+          "name": "Create payment - success",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', 'postman-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('bukan replay', () => pm.expect(pm.response.headers.get('Idempotent-Replayed')).to.eql('false'));",
+                  "const body = pm.response.json();",
+                  "pm.test('status SUCCEEDED', () => pm.expect(body.status).to.eql('SUCCEEDED'));",
+                  "pm.collectionVariables.set('paymentId', body.id);",
+                  "pm.collectionVariables.set('paymentReference', body.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"CUST-1\",\n  \"amount\": 100000.00,\n  \"currency\": \"IDR\",\n  \"description\": \"Invoice #1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments"]
+            }
+          }
+        },
+        {
+          "name": "Replay - same key, same body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK (replay)', () => pm.response.to.have.status(200));",
+                  "pm.test('header replay true', () => pm.expect(pm.response.headers.get('Idempotent-Replayed')).to.eql('true'));",
+                  "const body = pm.response.json();",
+                  "pm.test('payment id sama', () => pm.expect(body.id).to.eql(pm.collectionVariables.get('paymentId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"CUST-1\",\n  \"amount\": 100000.00,\n  \"currency\": \"IDR\",\n  \"description\": \"Invoice #1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments"]
+            }
+          }
+        },
+        {
+          "name": "Conflict - same key, different body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('code IDEMPOTENCY_KEY_REUSED', () => pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REUSED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"CUST-1\",\n  \"amount\": 999.00,\n  \"currency\": \"IDR\",\n  \"description\": \"Invoice #1\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments"]
+            }
+          }
+        },
+        {
+          "name": "Create payment - timeout -> IN_DOUBT",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', 'postman-timeout-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('status IN_DOUBT', () => pm.expect(body.status).to.eql('IN_DOUBT'));",
+                  "pm.collectionVariables.set('inDoubtId', body.id);",
+                  "pm.collectionVariables.set('inDoubtReference', body.reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"CUST-1\",\n  \"amount\": 100000.77,\n  \"currency\": \"IDR\",\n  \"description\": \"Timeout scenario\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments"]
+            }
+          }
+        },
+        {
+          "name": "Create payment - decline -> FAILED",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', 'postman-decline-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('status FAILED', () => pm.expect(body.status).to.eql('FAILED'));",
+                  "pm.test('failure reason terisi', () => pm.expect(body.failureReason).to.be.a('string').and.not.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"CUST-1\",\n  \"amount\": 100000.55,\n  \"currency\": \"IDR\",\n  \"description\": \"Decline scenario\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments"]
+            }
+          }
+        },
+        {
+          "name": "Get payment by id (success)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('status SUCCEEDED', () => pm.expect(pm.response.json().status).to.eql('SUCCEEDED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments/{{paymentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments", "{{paymentId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Webhook",
+      "item": [
+        {
+          "name": "Partner webhook - signed SUCCEEDED",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const reference = pm.collectionVariables.get('inDoubtReference') || pm.collectionVariables.get('paymentReference');",
+                  "const body = JSON.stringify({",
+                  "  eventId: 'evt-' + Date.now(),",
+                  "  reference: reference,",
+                  "  status: 'SUCCEEDED',",
+                  "  partnerReference: 'PTR-WEBHOOK'",
+                  "});",
+                  "pm.collectionVariables.set('webhookBody', body);",
+                  "const timestamp = Math.floor(Date.now() / 1000);",
+                  "const bodyHash = CryptoJS.SHA256(body).toString(CryptoJS.enc.Hex);",
+                  "const canonical = 'POST\\n/api/v1/webhooks/partner\\n' + timestamp + '\\n' + bodyHash;",
+                  "const signature = CryptoJS.HmacSHA256(canonical, pm.collectionVariables.get('hmacSecret')).toString(CryptoJS.enc.Hex);",
+                  "pm.variables.set('webhookTimestamp', String(timestamp));",
+                  "pm.variables.set('webhookSignature', 'v1=' + signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Timestamp", "value": "{{webhookTimestamp}}" },
+              { "key": "X-Signature", "value": "{{webhookSignature}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{webhookBody}}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/partner",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "webhooks", "partner"]
+            }
+          }
+        },
+        {
+          "name": "Get payment by id (after webhook)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('IN_DOUBT resolved ke SUCCEEDED', () => pm.expect(body.status).to.eql('SUCCEEDED'));",
+                  "pm.test('partner reference dari webhook', () => pm.expect(body.partnerReference).to.eql('PTR-WEBHOOK'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/payments/{{inDoubtId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "payments", "{{inDoubtId}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

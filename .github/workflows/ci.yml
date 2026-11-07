@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-java17:
+    name: Test (Java 17, H2 + WireMock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Run tests
+        run: mvn -B verify
+
+  test-java21:
+    name: Test (Java 21, virtual threads profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Run tests with Java 21
+        run: mvn -B -Pjava21 verify
+
+  testcontainers-postgres:
+    name: Testcontainers (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      # Test ini di-tag "docker"; profile dockertests membuka exclusion-nya.
+      - name: Run PostgreSQL integration test
+        run: mvn -B -Pjava21,dockertests verify
