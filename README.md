@@ -26,18 +26,20 @@ Flyway, ShedLock, dan automated testing.
 | Idempotency | `JdbcIdempotencyStore` + unique constraint `idempotency_records` |
 | In-doubt transaction | status `IN_DOUBT` + `ReconciliationService` |
 | Transactional outbox | `shared/outbox`, `PaymentStateWriter`, `OutboxRelay` |
+| Kafka producer + idempotent consumer + DLT | `KafkaPaymentEventPublisher`, `PaymentEventKafkaConsumer`, `KafkaConsumerConfig`, `PaymentEventLogStore`, profile `kafka` |
+| API Gateway | `api-gateway/` (Spring Cloud Gateway: routing, API key filter, correlation id, CORS) |
 | Resilience4j | `@Retry` di `PartnerHttpClient`, `@CircuitBreaker` di `PartnerWebClientAdapter` |
 | Background reconciliation worker | `ReconciliationJob` (`@Scheduled` + ShedLock) |
 | Oracle/PostgreSQL | profile `postgres`; SQL Flyway portable H2/Postgres |
-| Flyway migration | `db/migration/V1__init.sql`, `V2__outbox.sql` |
+| Flyway migration | `db/migration/V1__init.sql`, `V2__outbox.sql`, `V3__kafka_consumer.sql` |
 | Redis caching + distributed lock | `application-redis.yml`, `RedisCacheManager`, `RedisLockProvider` |
 | JUnit 5 + Mockito | `PaymentApplicationServiceTest` |
 | WireMock | `PartnerWebClientAdapterTest`, `PaymentApiIntegrationTest` |
-| Testcontainers | `PaymentPersistencePostgresIT` (tag `docker`) |
+| Testcontainers | `PaymentPersistencePostgresIT`, `KafkaOutboxIT` (tag `docker`) |
 | ArchUnit | `ArchitectureTest` (domain tidak boleh depend Spring/JPA) |
-| Docker | `docker-compose.yml` (Postgres + Redis, opsional) |
-| Postman | `postman/Payment-Service-Project.postman_collection.json` |
-| CI | `.github/workflows/ci.yml` (Java 17, Java 21, Testcontainers) |
+| Docker | `docker-compose.yml` (Postgres + Redis + Kafka, opsional) |
+| Postman | `postman/Payment-Service-Project.postman_collection.json` + environment gateway |
+| CI | `.github/workflows/ci.yml` (Java 17, Java 21, Testcontainers, API Gateway) |
 
 ---
 
@@ -64,6 +66,12 @@ src/main/java/com/vian/payments
 │   └── reconciliation/     # scheduled job + ShedLock
 └── sandbox/                # partner palsu untuk demo lokal
 ```
+
+Modul tambahan untuk Kafka dan gateway:
+
+- `shared/kafka` — envelope event, producer Kafka, topic admin, error handler DLT, inbox store.
+- `payment/adapter/in/messaging` — consumer Kafka yang idempotent.
+- `api-gateway/` — project Spring Cloud Gateway terpisah (port `8081`).
 
 Aturan dependensi yang dijaga ArchUnit:
 
@@ -109,7 +117,7 @@ payment dan baris `outbox_events` dalam transaksi yang sama.
 `OutboxRelay` lalu:
 
 1. Ambil event `PENDING` yang sudah jatuh tempo (batch 50).
-2. Publish lewat port `PaymentEventPublisher` (demo: log; production: Kafka/HTTP).
+2. Publish lewat port `PaymentEventPublisher` (default: log; profile `kafka`: Kafka producer).
 3. Tandai `PUBLISHED`, atau `PENDING` + `next_attempt_at` dengan exponential backoff kalau gagal.
 4. Setelah 10 percobaan → `DEAD` (bisa di-alert/requeue manual).
 5. Purge event `PUBLISHED` yang lebih tua dari 7 hari.
@@ -131,6 +139,9 @@ mvn spring-boot:run
 ```
 
 Aplikasi jalan di `http://localhost:8080`. API key default: `local-dev-key`.
+
+Tanpa profile tambahan, aplikasi tetap memakai H2, cache in-memory, dan publisher log.
+Kafka dan API Gateway opsional; cara menjalankannya ada di bagian 7 dan 12.
 
 Cek health:
 
@@ -218,6 +229,9 @@ Yang jalan:
   mapping 402 → declined, 500 → exception (di aplikasi jadi UNKNOWN).
 - **Integration** — `PaymentApiIntegrationTest`: Spring Security, REST, WebClient, Flyway, H2,
   idempotency, webhook, reconciliation, dan bukti baris outbox ikut tersimpan. Partner diganti WireMock.
+- **Kafka publisher** — `KafkaPaymentEventPublisherTest`: envelope, key, header, dan error broker.
+- **Kafka consumer** — `PaymentEventKafkaConsumerTest`: envelope valid dan payload rusak.
+- **Kafka inbox** — `PaymentEventLogStoreTest`: event yang sama hanya disimpan sekali.
 - **ArchUnit** — `ArchitectureTest`: domain bebas framework, application tidak import adapter.
 
 Testcontainers (butuh Docker, di-skip otomatis kalau tidak ada Docker):
@@ -226,26 +240,38 @@ Testcontainers (butuh Docker, di-skip otomatis kalau tidak ada Docker):
 mvn test -Pdockertests
 ```
 
-`PaymentPersistencePostgresIT` menjalankan Flyway + JPA terhadap PostgreSQL 16 asli.
+- `PaymentPersistencePostgresIT` menjalankan Flyway + JPA terhadap PostgreSQL 16 asli.
+- `KafkaOutboxIT` menjalankan producer → Kafka → consumer → inbox, termasuk dedupe event duplikat.
+
+### API Gateway test
+
+```powershell
+cd api-gateway
+mvn test
+```
+
+Test ini memakai WireMock sebagai downstream dan memverifikasi routing, API key, dan `X-Request-Id`.
 
 ### CI
 
-`.github/workflows/ci.yml` menjalankan tiga job:
+`.github/workflows/ci.yml` menjalankan empat job:
 
 | Job | Isi |
 |---|---|
 | `test-java17` | `mvn -B verify` (sesuai laptop lokal) |
 | `test-java21` | `mvn -B -Pjava21 verify` (virtual threads aktif) |
-| `testcontainers-postgres` | `mvn -B -Pjava21,dockertests verify` (PostgreSQL 16 asli) |
+| `testcontainers` | `mvn -B -Pjava21,dockertests verify` (PostgreSQL 16 + Kafka) |
+| `test-api-gateway` | `mvn -B -f api-gateway/pom.xml verify` |
 
 ---
 
 ## 6. Postman collection
 
-Import dua file ini ke Postman:
+Import file collection dan salah satu environment:
 
 - `postman/Payment-Service-Project.postman_collection.json`
-- `postman/local.postman_environment.json`
+- `postman/local.postman_environment.json` (langsung ke service, port `8080`)
+- `postman/gateway.postman_environment.json` (lewat API Gateway, port `8081`)
 
 Jalankan lewat **Collection Runner** (bukan satu-satu) karena request saling bergantung:
 
@@ -260,20 +286,49 @@ Script HMAC di Postman memakai `CryptoJS` dan canonical string yang sama dengan 
 
 ---
 
-## 7. PostgreSQL & Redis (opsional)
+## 7. PostgreSQL, Redis & Kafka (opsional)
 
-`docker-compose.yml` menyediakan Postgres + Redis:
+`docker-compose.yml` menyediakan Postgres, Redis, dan Kafka:
 
 ```powershell
 docker compose up -d
-mvn spring-boot:run "-Dspring-boot.run.profiles=postgres,redis"
+mvn spring-boot:run "-Dspring-boot.run.profiles=postgres,redis,kafka"
 ```
 
 - `postgres` → ganti H2 ke PostgreSQL (`application-postgres.yml`)
 - `redis` → cache pakai Redis + ShedLock pakai `RedisLockProvider` (`application-redis.yml`)
+- `kafka` → outbox publish ke Kafka + consumer idempotent (`application-kafka.yml`)
 
-Tanpa Docker, default H2 + `ConcurrentMapCacheManager` + ShedLock JDBC tetap jalan.
+Tanpa Docker, default H2 + `ConcurrentMapCacheManager` + ShedLock JDBC + publisher log tetap jalan.
 Itu sengaja supaya demo bisa langsung dijalankan di laptop ini.
+
+### Kafka: alur yang didemokan
+
+```
+PaymentStateWriter
+  -> outbox_events (transaksi yang sama dengan payment)
+  -> OutboxRelay
+  -> Kafka topic payments.events
+  -> PaymentEventKafkaConsumer
+  -> payment_event_log (primary key = event_id)
+```
+
+- Event dikirim sebagai envelope: `eventId`, `eventType`, `aggregateType`, `aggregateId`,
+  `occurredAt`, dan `payload` bisnis.
+- Producer menunggu ack broker sebelum relay menandai outbox `PUBLISHED`.
+- Consumer idempotent: event yang sama boleh datang lagi, tetapi `event_id` hanya masuk sekali.
+- Kalau consumer error, `DefaultErrorHandler` retry 2x lalu mengirim record ke
+  `payments.events.DLT`. Payload rusak langsung ke DLT karena retry tidak akan memperbaikinya.
+- Tanpa Kafka, `app.kafka.enabled=false` dan `LoggingPaymentEventPublisher` yang aktif.
+
+Override lewat env var:
+
+```powershell
+$env:KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+$env:KAFKA_TOPIC = "payments.events"
+$env:KAFKA_CONSUMER_GROUP = "payment-audit"
+mvn spring-boot:run "-Dspring-boot.run.profiles=kafka"
+```
 
 ---
 
@@ -328,6 +383,14 @@ virtual threads vs WebFlux, kapan masing-masing dipakai.
    Timestamp mencegah replay (toleransi 5 menit); `MessageDigest.isEqual` mencegah timing attack.
    Secret di production harus dari vault/KMS, bukan YAML.
 
+9. **Kafka consumer idempotent, bukan exactly-once.**
+   Kafka memberi at-least-once. Dedupe di `payment_event_log.event_id` membuat consumer aman
+   kalau event dikirim ulang. Ini lebih jujur daripada mengklaim exactly-once end-to-end.
+
+10. **API Gateway bukan pengganti security service.**
+    Gateway menolak request tanpa API key di edge, tetapi payment service tetap memvalidasi
+    API key sendiri. Gateway juga meneruskan `X-Request-Id` supaya log bisa dikorelasikan.
+
 ---
 
 ## 10. Yang sengaja disederhanakan (next step)
@@ -335,7 +398,7 @@ virtual threads vs WebFlux, kapan masing-masing dipakai.
 - Outbox memakai polling sederhana; production bisa `SKIP LOCKED`, batch lebih besar, atau CDC.
 - Belum ada **state machine table/audit trail** (sekarang status ada di kolom payment).
 - Belum ada **key rotation** HMAC (butuh key id di header).
-- Belum ada **rate limiting**, mTLS, OAuth2 client credentials.
+- Belum ada **rate limiting di gateway**, mTLS, OAuth2 client credentials.
 - Idempotency record di-purge setelah 24 jam; production perlu strategi retensi yang eksplisit.
 - Sandbox partner hanya untuk demo, bukan pengganti integrasi LOS/ESB/PSP.
 - Cache `payment-by-id` memakai `allEntries=true` saat berubah; production bisa evict per key
@@ -348,3 +411,65 @@ virtual threads vs WebFlux, kapan masing-masing dipakai.
 ## 11. OpenAPI
 
 Kontrak request/response ada di [`openapi/payment-service.yaml`](openapi/payment-service.yaml).
+
+---
+
+## 12. API Gateway (opsional)
+
+`api-gateway/` adalah project Spring Cloud Gateway terpisah. Payment service tetap berjalan di
+`8080`; gateway mendengarkan di `8081`.
+
+```powershell
+# terminal 1
+mvn spring-boot:run
+
+# terminal 2
+cd api-gateway
+mvn spring-boot:run
+```
+
+Cek gateway:
+
+```powershell
+Invoke-RestMethod http://localhost:8081/actuator/health | ConvertTo-Json
+```
+
+Route yang tersedia:
+
+| Path | Tujuan | Keterangan |
+|---|---|---|
+| `/api/v1/payments/**` | payment service | wajib `X-Api-Key` di gateway |
+| `/api/v1/webhooks/**` | payment service | bypass API key, tetap pakai HMAC |
+| `/sandbox/**` | payment service | untuk demo lokal |
+
+Yang didemokan di gateway:
+
+- **Routing** — `spring.cloud.gateway.routes` di `api-gateway/src/main/resources/application.yml`.
+- **API key filter** — `ApiKeyGatewayFilter` menolak request tanpa key dengan 401 problem+json.
+- **Correlation id** — `CorrelationIdFilter` membuat/meneruskan `X-Request-Id` ke service dan response.
+  `RequestIdFilter` di payment service mengisi MDC, jadi log service menampilkan `[requestId:...]`.
+- **CORS** — `globalcors` untuk frontend lokal.
+- **Defense in depth** — service tetap memvalidasi API key sendiri.
+
+Konfigurasi lewat env:
+
+```powershell
+$env:API_KEY = "local-dev-key"
+$env:PAYMENT_SERVICE_URL = "http://localhost:8080"
+cd api-gateway
+mvn spring-boot:run
+```
+
+Postman: pakai `postman/gateway.postman_environment.json` supaya semua request lewat `8081`.
+
+Lewat Docker:
+
+```powershell
+docker compose --profile gateway up -d --build
+```
+
+Compose memakai `host.docker.internal:8080` supaya gateway di container bisa memanggil payment
+service yang jalan di host.
+
+Untuk production, langkah berikutnya adalah rate limiting (Redis), circuit breaker di gateway,
+service discovery, dan JWT/OAuth2 di edge.

@@ -1,0 +1,44 @@
+server:
+  port: ${SERVER_PORT:8081}
+  shutdown: graceful
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+      routes:
+        - id: payment-service
+          uri: ${app.payment-service-url:http://localhost:8080}
+          predicates:
+            - Path=/api/v1/payments/**,/api/v1/webhooks/**,/sandbox/**
+
+app:
+  security:
+    api-key: ${API_KEY:local-dev-key}
+  payment-service-url: ${PAYMENT_SERVICE_URL:http://localhost:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.vian.gateway: INFO
+    org.springframework.cloud.gateway: INFO

@@ -1,0 +1,34 @@
+spring:
+  config:
+    activate:
+      on-profile: kafka
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: payment-service-project
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 10
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:payment-audit}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+      missing-topics-fatal: false
+
+app:
+  kafka:
+    enabled: true
+    topic: ${KAFKA_TOPIC:payments.events}
+    dlt-topic: ${KAFKA_DLT_TOPIC:payments.events.DLT}
+    partitions: ${KAFKA_PARTITIONS:3}
+    replicas: ${KAFKA_REPLICAS:1}
+    send-timeout: ${KAFKA_SEND_TIMEOUT:10s}
+    consumer-group: ${KAFKA_CONSUMER_GROUP:payment-audit}

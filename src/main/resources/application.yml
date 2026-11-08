@@ -96,6 +96,9 @@ resilience4j:
           - java.util.concurrent.TimeoutException
 
 logging:
+  pattern:
+    # RequestIdFilter mengisi MDC ini dari header X-Request-Id gateway.
+    level: "%5p [requestId:%X{requestId:-}]"
   level:
     root: INFO
     com.vian.payments: INFO
